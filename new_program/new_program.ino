@@ -113,6 +113,7 @@ void stopProcess()
   currentStatus = free_state;
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(BUZZER_PIN, LOW);
+  dailyTimer = millis();
   Serial.println("Status: free_state - All Off");
 }
 
@@ -172,7 +173,6 @@ void checkIrrigationLogic()
       if (now - wateringStartTime >= (unsigned long)WATER_DURATION_MIN * 60 * 1000L) 
       {
         flag = true;
-        dailyTimer = now; // 定时结束，开始重新计时浇水时间
       }
     }
 
@@ -211,6 +211,7 @@ void handleKeypad(char key)
   { // 模式切换
     systemMode++; 
     if (systemMode > 4) systemMode = 1; 
+    dailyTimer = millis();
     return; 
   }
 
