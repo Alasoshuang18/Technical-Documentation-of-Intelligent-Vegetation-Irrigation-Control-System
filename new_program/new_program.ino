@@ -8,9 +8,9 @@ enum SystemStatus { free_state, WARNING, WATERING };
 SystemStatus currentStatus = free_state;
 
 // --- 引脚定义 ---
-#define BUZZER_PIN    PB0
-#define RELAY_PIN     PA8
-#define LIGHT_PIN     PA0
+#define BUZZER_PIN     PB0
+#define RELAY_PIN      PA8
+#define LIGHT_PIN      PA0
 const int soilPins[4] = {PA1, PA2, PA3, PA4};
 
 #define SCREEN_WIDTH 128
@@ -32,19 +32,19 @@ byte colPins[COLS] = {PB4, PB3, PB9, PB8};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 // --- 系统变量 ---
-int IRRIGATION_THRESHOLD = 30;
-int WATER_DURATION_MIN = 30;       // 喷水时长（分钟）
+int IRRIGATION_THRESHOLD = 30;     // 湿度阈值
+int WATER_DURATION_MIN = 10;       // 喷水持续时长（分钟）
+int INTERVAL_HOUR = 24;            // 喷水间隔周期（小时）- 新增
+
 int systemMode = 1;                // 1:湿度, 2:定时, 3:湿度+定时, 4:停止
-int settingStep = 0;               // 设置步骤: 0:阈值, 1:时长
+int settingStep = 0;               // 设置步骤: 0:阈值, 1:间隔小时, 2:时长
 
 unsigned long warningStartTime = 0;
 unsigned long wateringStartTime = 0;
-unsigned long dailyTimer = 0;      // 模拟每日定时
+unsigned long dailyTimer = 0;      
 unsigned long lastProcessTime = 0;
 
-const unsigned long MS_PER_DAY = 24 * 3600 * 1000L; // 一天毫秒数
-const unsigned long WARNING_MS = 60 * 1000L;        // 预警1分钟
-
+const unsigned long WARNING_MS = 20 * 1000L;  // 预警20s
 unsigned long last_BUZZER_time = 0;
 bool flag_Buzzer = false;
 
@@ -54,10 +54,8 @@ bool isSettingMode = false;
 String inputBuffer = "";
 int soilPercentages[4];
 int avgMoisture = 0;
-unsigned long now = millis();
 
-void setup() 
-{
+void setup() {
   // 禁用 JTAG 释放 PB3, PB4
   RCC->APB2ENR |= RCC_APB2ENR_AFIOEN; 
   AFIO->MAPR |= AFIO_MAPR_SWJ_CFG_JTAGDISABLE; 
@@ -70,148 +68,115 @@ void setup()
 
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();
-  dailyTimer = millis(); // 初始化启动计时
+  dailyTimer = millis(); 
 }
 
-void loop() 
-{
+void loop() {
   char key = keypad.getKey();
   if (key) handleKeypad(key);
 
-  // 每300ms处理一次逻辑和显示，保证系统流畅
-  if (millis() - lastProcessTime >= 300)
-   {
-      lastProcessTime = millis();
-      readSensors();
-      checkIrrigationLogic(); 
+  if (millis() - lastProcessTime >= 300) {
+    lastProcessTime = millis();
+    readSensors();
+    checkIrrigationLogic(); 
     
-      if (!isSettingMode) updateDisplayMonitor();
-      else updateDisplaySetting();
+    if (!isSettingMode) updateDisplayMonitor();
+    else updateDisplaySetting();
   }
 }
 
-// --- 核心逻辑控制 ---
+// --- 核心逻辑 ---
 
-
-//以下两个函数都是在空闲状态下才能执行
-void startProcess() 
-{
-  // 只有在空闲状态下才能启动新流程
-  if (currentStatus == free_state) 
-  {
+void startProcess() {
+  if (currentStatus == free_state) {
     currentStatus = WARNING;
     warningStartTime = millis();
     last_BUZZER_time = millis();
     flag_Buzzer = true;
-    digitalWrite(BUZZER_PIN, HIGH); // 开启预警蜂鸣器
-    Serial.println("Status: WARNING - Buzzer On");
+    digitalWrite(BUZZER_PIN, HIGH);
   }
 }
 
-void stopProcess() 
-{
+void stopProcess() {
   currentStatus = free_state;
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(BUZZER_PIN, LOW);
-  dailyTimer = millis();
-  Serial.println("Status: free_state - All Off");
+  // 注意：如果是定时触发结束，重置计时器在 checkIrrigationLogic 里处理更精准
 }
 
-void checkIrrigationLogic() 
-{
-  now = millis();
-  // 模式4为强制停止模式
+void checkIrrigationLogic() {
+  unsigned long now = millis();
+  
   if (systemMode == 4) { stopProcess(); return; }
-  // 1. 触发判断 (仅在空闲状态 free_state 检查)
-  if (currentStatus == free_state)
-   {
-    bool sensorTrigger = ((systemMode == 1 || systemMode == 3) && avgMoisture < IRRIGATION_THRESHOLD);//avgMoisture是平均湿度
-    bool timerTrigger = ((systemMode == 2 || systemMode == 3) && (now - dailyTimer >= MS_PER_DAY));
+
+  // 1. 触发判断 (空闲态)
+  if (currentStatus == free_state) {
+    // 自动计算毫秒间隔，支持用户修改 INTERVAL_HOUR
+    unsigned long targetIntervalMs = (unsigned long)INTERVAL_HOUR * 3600 * 1000L;
     
-    if (sensorTrigger || timerTrigger) 
-    {
+    bool sensorTrigger = ((systemMode == 1 || systemMode == 3) && avgMoisture < IRRIGATION_THRESHOLD);
+    bool timerTrigger = ((systemMode == 2 || systemMode == 3) && (now - dailyTimer >= targetIntervalMs));
+    
+    if (sensorTrigger || timerTrigger) {
         startProcess();
         return;
     }
   }
 
-  // 2. 状态机自动流转 也是定时器开始进行判断工作
-  if (currentStatus == WARNING) 
-  {
-    if (now - last_BUZZER_time >= 500)// 500ms 翻转一次
-    { 
+  // 2. 状态机流转
+  if (currentStatus == WARNING) {
+    if (now - last_BUZZER_time >= 500) { 
       last_BUZZER_time = now;
       flag_Buzzer = !flag_Buzzer;
       digitalWrite(BUZZER_PIN, flag_Buzzer ? HIGH : LOW);
     }
 
-    // 检查预警是否结束（60秒）
-    if (now - warningStartTime >= WARNING_MS) 
-    {
-      digitalWrite(BUZZER_PIN, LOW); // 预警结束，关闭蜂鸣器
+    if (now - warningStartTime >= WARNING_MS) {
+      digitalWrite(BUZZER_PIN, LOW); 
       digitalWrite(RELAY_PIN, HIGH);
       currentStatus = WATERING;
       wateringStartTime = now;
-      Serial.println("Status: WATERING - Relay On");
     }
   } 
-  //固定时间喷水的，比如每天喷1次，时长一样
-  //后期做改动，将第一个变为 纯湿度传感器 不受时间控制
-    else if (currentStatus == WATERING)
-    {
-      bool flag = false;//检测是否达到阈值停止
-      if(systemMode == 1)
-      {
-        if(IRRIGATION_THRESHOLD + 5 <= avgMoisture) //加点误差，防止测出来的值不稳经常去开关继电器
-        {
-            flag = true;
-        }
-      }
+  else if (currentStatus == WATERING) {
+    bool shouldStop = false;
 
-    else if (systemMode == 2) 
-    {
-      if (now - wateringStartTime >= (unsigned long)WATER_DURATION_MIN * 60 * 1000L) 
-      {
-        flag = true;
+    if(systemMode == 1) { // 纯湿度模式
+      if(avgMoisture >= (IRRIGATION_THRESHOLD + 5)) shouldStop = true;
+    }
+    else if (systemMode == 2) { // 纯定时模式
+      if (now - wateringStartTime >= (unsigned long)WATER_DURATION_MIN * 60 * 1000L) {
+        shouldStop = true;
+        dailyTimer = now; // 任务完成后更新定时器起点
       }
     }
-
-    else if (systemMode == 3) 
-    {
+    else if (systemMode == 3) { // 混合模式
       bool timeReached = (now - wateringStartTime >= (unsigned long)WATER_DURATION_MIN * 60 * 1000L);
       bool moistureReached = (avgMoisture >= IRRIGATION_THRESHOLD);
       
-      if (timeReached) 
-      {
-        if(!moistureReached)
-        {
-            wateringStartTime = now;
-        }
-        else 
-        {
-          stopProcess();
-          flag = true;
-          dailyTimer = now; // 任务彻底完成，重置 从现在开始计时
+      if (timeReached) {
+        if(moistureReached) {
+          shouldStop = true;
+          dailyTimer = now; 
+        } else {
+          // 如果时间到了湿度还没够，重置 wateringStartTime 继续喷下一个周期（或者你可以让它一直喷）
+          // 这里保持 RELAY 为 HIGH，等待湿度达标
         }
       }
     }
-    if (flag) 
-    {
-      stopProcess();
-    }
+
+    if (shouldStop) stopProcess();
   }
 }
 
-void handleKeypad(char key) 
-{
-  if (key == 'L') { stopProcess(); return; } // 一键停水
-  if (key == 'R') { startProcess(); return; } // 一键喷水
+void handleKeypad(char key) {
+  if (key == 'L') { stopProcess(); return; }
+  if (key == 'R') { startProcess(); return; }
   
-  if (key == 'G') 
-  { // 模式切换
+  if (key == 'G') {
     systemMode++; 
     if (systemMode > 4) systemMode = 1; 
-    dailyTimer = millis();
+    dailyTimer = millis(); // 切换模式时重置计时
     return; 
   }
 
@@ -225,13 +190,20 @@ void handleKeypad(char key)
   } 
   else if (key == 'S') { 
     if (isSettingMode) {
-      if (settingStep == 0) {
+      if (settingStep == 0) { // 设置湿度阈值
         if (inputBuffer.length() > 0) IRRIGATION_THRESHOLD = inputBuffer.toInt();
         inputBuffer = "";
         settingStep = 1; 
-      } else {
+      } 
+      else if (settingStep == 1) { // 设置间隔小时 (新增)
+        if (inputBuffer.length() > 0) INTERVAL_HOUR = inputBuffer.toInt();
+        inputBuffer = "";
+        settingStep = 2;
+      }
+      else if (settingStep == 2) { // 设置喷水时长
         if (inputBuffer.length() > 0) WATER_DURATION_MIN = inputBuffer.toInt();
         isSettingMode = false;
+        settingStep = 0;
       }
     }
   } 
@@ -240,7 +212,7 @@ void handleKeypad(char key)
   }
 }
 
-// --- 传感器读取与显示 ---
+// --- 显示与传感器 ---
 
 void readSensors() {
   long totalSum = 0;
@@ -259,15 +231,12 @@ void updateDisplayMonitor() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0,0);
   
-  display.print("MOD:"); display.print(systemMode);
-  display.print(" LIM:"); display.print(IRRIGATION_THRESHOLD);
-  display.print("% T:"); display.print(WATER_DURATION_MIN); display.println("m");
+  display.print("M:"); display.print(systemMode);
+  display.print(" H:"); display.print(INTERVAL_HOUR); // 显示间隔小时
+  display.print(" T:"); display.print(WATER_DURATION_MIN); display.println("m");
 
   display.setCursor(0, 12);
-  display.print("AVG:"); display.print(avgMoisture); display.print("%  ST:");
-  if (currentStatus == free_state) display.print("free");
-  else if (currentStatus == WARNING) display.print("WARN");
-  else display.print("WTR");
+  display.print("AVG:"); display.print(avgMoisture); display.print("% TH:"); display.print(IRRIGATION_THRESHOLD);
 
   for(int i=0; i<4; i++) {
     display.setCursor((i%2)*64, 25 + (i/2)*10);
@@ -276,24 +245,37 @@ void updateDisplayMonitor() {
   }
   
   display.setCursor(0, 52);
-  display.print("G:Mode L:Stop R:Run");
+  if (currentStatus == free_state) display.print("State: FREE");
+  else if (currentStatus == WARNING) display.print("State: !!WARN!!");
+  else display.print("State: WATERING");
+  
   display.display();
 }
 
 void updateDisplaySetting() {
   display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
   display.setCursor(0,0);
   display.println("--- SETTING MODE ---");
+  display.setCursor(0, 15);
+  
   if (settingStep == 0) {
-    display.println("Set Threshold (0-99%):");
+    display.println("1. Set Humidity %:");
+    display.print("Current: "); display.println(IRRIGATION_THRESHOLD);
+  } else if (settingStep == 1) {
+    display.println("2. Set Interval (H):");
+    display.print("Current: "); display.println(INTERVAL_HOUR);
   } else {
-    display.println("Set Duration (min):");
+    display.println("3. Set Duration (M):");
+    display.print("Current: "); display.println(WATER_DURATION_MIN);
   }
+  
   display.setTextSize(2);
-  display.setCursor(30, 30);
+  display.setCursor(40, 35);
   display.print(inputBuffer); display.print("_");
+  
   display.setTextSize(1);
   display.setCursor(0, 55);
-  display.print("S:Next/Save  E:Exit");
+  display.print("S:Next  E:Exit");
   display.display();
 }
